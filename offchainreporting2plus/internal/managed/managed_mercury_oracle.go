@@ -2,10 +2,12 @@ package managed
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/smartcontractkit/libocr/commontypes"
 	"github.com/smartcontractkit/libocr/internal/loghelper"
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/internal/config/ocr3config"
+	"github.com/smartcontractkit/libocr/offchainreporting2plus/internal/managed/limits"
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/internal/mercuryshim"
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/internal/ocr3/protocol"
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/internal/ocr3/serialization"
@@ -13,6 +15,7 @@ import (
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/ocr3types"
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 	"github.com/smartcontractkit/libocr/subprocesses"
+	"go.uber.org/multierr"
 )
 
 // RunManagedMercuryOracle runs a "managed" version of protocol.RunOracle. It handles
@@ -95,7 +98,7 @@ func RunManagedMercuryOracle(
 				sharedConfig.F,
 				sharedConfig.OnchainConfig,
 				sharedConfig.ReportingPluginConfig,
-				sharedConfig.DeltaRound,
+				sharedConfig.MinRoundInterval(),
 				sharedConfig.MaxDurationObservation,
 			})
 			if err != nil {
@@ -110,21 +113,23 @@ func RunManagedMercuryOracle(
 				"ManagedMercuryOracle: error during reportingPlugin.Close()",
 			)
 
-			// if err := validateReportingPluginLimits(merucuryPluginInfo.Limits); err != nil {
-			// 	logger.Error("ManagedMercuryOracle: invalid ReportingPluginInfo", commontypes.LogFields{
-			// 		"error":               err,
-			// 		"reportingPluginInfo": reportingPluginInfo,
-			// 	})
-			// 	return
-			// }
+			if err := validateMercuryPluginLimits(mercuryPluginInfo.Limits); err != nil {
+				logger.Error("ManagedMercuryOracle: invalid MercuryPluginInfo", commontypes.LogFields{
+					"error":             err,
+					"mercuryPluginInfo": mercuryPluginInfo,
+				})
+				return
+			}
 
-			lims, err := todoLimits()
+			ocr3PluginLimits := mercuryshim.OCR3PluginLimits(mercuryPluginInfo.Limits)
+
+			lims, err := limits.OCR3Limits(sharedConfig.PublicConfig, ocr3PluginLimits, onchainKeyring.MaxSignatureLength())
 			if err != nil {
 				logger.Error("ManagedMercuryOracle: error during limits", commontypes.LogFields{
-					"error":             err,
-					"publicConfig":      sharedConfig.PublicConfig,
-					"mercuryPluginInfo": mercuryPluginInfo,
-					"maxSigLen":         onchainKeyring.MaxSignatureLength(),
+					"error":            err,
+					"publicConfig":     sharedConfig.PublicConfig,
+					"ocr3PluginLimits": ocr3PluginLimits,
+					"maxSigLen":        onchainKeyring.MaxSignatureLength(),
 				})
 				return
 			}
@@ -150,7 +155,11 @@ func RunManagedMercuryOracle(
 				chTelemetrySend,
 				sharedConfig.ConfigDigest,
 				binNetEndpoint,
+				onchainKeyring.MaxSignatureLength(),
 				childLogger,
+				ocr3PluginLimits,
+				sharedConfig.N(),
+				sharedConfig.F,
 			)
 			if err := netEndpoint.Start(); err != nil {
 				logger.Error("ManagedMercuryOracle: error during netEndpoint.Start()", commontypes.LogFields{
@@ -165,7 +174,7 @@ func RunManagedMercuryOracle(
 				"ManagedMercuryOracle: error during netEndpoint.Close()",
 			)
 
-			ocr3PluginConfig := ocr3types.OCR3PluginConfig{
+			ocr3PluginConfig := ocr3types.ReportingPluginConfig{
 				sharedConfig.ConfigDigest,
 				oid,
 				sharedConfig.N(),
@@ -175,12 +184,13 @@ func RunManagedMercuryOracle(
 				sharedConfig.DeltaRound,
 				sharedConfig.MaxDurationQuery,
 				sharedConfig.MaxDurationObservation,
-				sharedConfig.MaxDurationShouldAcceptFinalizedReport,
+				sharedConfig.MaxDurationShouldAcceptAttestedReport,
 				sharedConfig.MaxDurationShouldTransmitAcceptedReport,
 			}
 			ocr3Plugin := &mercuryshim.MercuryOCR3Plugin{
 				ocr3PluginConfig,
 				mercuryPlugin,
+				mercuryPluginInfo.Limits,
 			}
 
 			protocol.RunOracle[mercuryshim.MercuryReportInfo](
@@ -194,9 +204,7 @@ func RunManagedMercuryOracle(
 				netEndpoint,
 				offchainKeyring,
 				mercuryshim.NewMercuryOCR3OnchainKeyring(onchainKeyring),
-
-				// shim.LimitCheckReportingPlugin{reportingPlugin, reportingPluginInfo.Limits},
-				ocr3Plugin,
+				shim.LimitCheckOCR3Plugin[mercuryshim.MercuryReportInfo]{ocr3Plugin, ocr3PluginLimits},
 				shim.MakeOCR3TelemetrySender(chTelemetrySend, childLogger),
 			)
 		},
@@ -206,16 +214,13 @@ func RunManagedMercuryOracle(
 	)
 }
 
-// func validateReportingPluginLimits(limits types.ReportingPluginLimits) error {
-// 	var err error
-// 	if !(0 <= limits.MaxQueryLength && limits.MaxQueryLength <= types.MaxMaxQueryLength) {
-// 		err = multierr.Append(err, fmt.Errorf("MaxQueryLength (%v) out of range. Should be between 0 and %v", limits.MaxQueryLength, types.MaxMaxQueryLength))
-// 	}
-// 	if !(0 <= limits.MaxObservationLength && limits.MaxObservationLength <= types.MaxMaxObservationLength) {
-// 		err = multierr.Append(err, fmt.Errorf("MaxObservationLength (%v) out of range. Should be between 0 and %v", limits.MaxObservationLength, types.MaxMaxObservationLength))
-// 	}
-// 	if !(0 <= limits.MaxReportLength && limits.MaxReportLength <= types.MaxMaxReportLength) {
-// 		err = multierr.Append(err, fmt.Errorf("MaxReportLength (%v) out of range. Should be between 0 and %v", limits.MaxReportLength, types.MaxMaxReportLength))
-// 	}
-// 	return err
-// }
+func validateMercuryPluginLimits(limits ocr3types.MercuryPluginLimits) error {
+	var err error
+	if !(0 <= limits.MaxObservationLength && limits.MaxObservationLength <= ocr3types.MaxMaxMercuryObservationLength) {
+		err = multierr.Append(err, fmt.Errorf("MaxObservationLength (%v) out of range. Should be between 0 and %v", limits.MaxObservationLength, ocr3types.MaxMaxMercuryObservationLength))
+	}
+	if !(0 <= limits.MaxReportLength && limits.MaxReportLength <= ocr3types.MaxMaxMercuryReportLength) {
+		err = multierr.Append(err, fmt.Errorf("MaxReportLength (%v) out of range. Should be between 0 and %v", limits.MaxReportLength, ocr3types.MaxMaxMercuryReportLength))
+	}
+	return err
+}

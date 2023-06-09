@@ -5,14 +5,25 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"hash"
 
 	"github.com/smartcontractkit/libocr/commontypes"
+	"github.com/smartcontractkit/libocr/internal/byzquorum"
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/internal/config"
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/ocr3types"
 	"github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 )
 
-const signedObservationDomainSeparator = "ocr3 SignedObservation"
+// Returns a byte slice whose first four bytes are the string "ocr3" and the rest
+// of which is the sum returned by h. Used for domain separation vs ocr2, where
+// we just directly sign sha256 hashes.
+//
+// Any signatures made with the OffchainKeyring should use ocr3DomainSeparatedSum!
+func ocr3DomainSeparatedSum(h hash.Hash) []byte {
+	result := make([]byte, 0, 4+32)
+	result = append(result, []byte("ocr3")...)
+	return h.Sum(result)
+}
 
 type SignedObservation struct {
 	Observation types.Observation
@@ -68,7 +79,7 @@ func signedObservationMsg(ocr3ts Timestamp, query types.Query, observation types
 	_ = binary.Write(h, binary.BigEndian, uint64(len(observation)))
 	_, _ = h.Write(observation)
 
-	return h.Sum(nil)
+	return ocr3DomainSeparatedSum(h)
 }
 
 type AttributedSignedObservation struct {
@@ -142,7 +153,6 @@ func MakePrepareSignature(
 	outcomeDigest OutcomeDigest,
 	signer func(msg []byte) ([]byte, error),
 ) (PrepareSignature, error) {
-
 	return signer(prepareSignatureMsg(ocr3ts, seqNr, outcomeInputsDigest, outcomeDigest))
 }
 
@@ -186,7 +196,7 @@ func prepareSignatureMsg(
 
 	_, _ = h.Write(outcomeDigest[:])
 
-	return h.Sum(nil)
+	return ocr3DomainSeparatedSum(h)
 }
 
 type AttributedPrepareSignature struct {
@@ -204,7 +214,6 @@ func MakeCommitSignature(
 	outcomeDigest OutcomeDigest,
 	signer func(msg []byte) ([]byte, error),
 ) (CommitSignature, error) {
-
 	return signer(commitSignatureMsg(ocr3ts, seqNr, outcomeDigest))
 }
 
@@ -244,7 +253,7 @@ func commitSignatureMsg(
 
 	_, _ = h.Write(outcomeDigest[:])
 
-	return h.Sum(nil)
+	return ocr3DomainSeparatedSum(h)
 }
 
 type AttributedCommitSignature struct {
@@ -320,7 +329,7 @@ func signedHighestCertifiedTimestampMsg(
 	}
 	_, _ = h.Write([]byte{byte(committedElsePreparedByte)})
 
-	return h.Sum(nil)
+	return ocr3DomainSeparatedSum(h)
 }
 
 type AttributedSignedHighestCertifiedTimestamp struct {
@@ -328,19 +337,18 @@ type AttributedSignedHighestCertifiedTimestamp struct {
 	Signer                          commontypes.OracleID
 }
 
-type StartEpochProof struct {
+type EpochStartProof struct {
 	HighestCertified      CertifiedPrepareOrCommit
 	HighestCertifiedProof []AttributedSignedHighestCertifiedTimestamp
 }
 
-func (qc *StartEpochProof) Verify(
+func (qc *EpochStartProof) Verify(
 	ocr3ts Timestamp,
 	oracleIdentities []config.OracleIdentity,
-	n int,
-	f int,
+	byzQuorumSize int,
 ) error {
-	if ByzQuorumSize(n, f) != len(qc.HighestCertifiedProof) {
-		return fmt.Errorf("wrong length of HighestCertifiedProof, expected %v for byz. quorum and got %v", ByzQuorumSize(n, f), len(qc.HighestCertifiedProof))
+	if byzQuorumSize != len(qc.HighestCertifiedProof) {
+		return fmt.Errorf("wrong length of HighestCertifiedProof, expected %v for byz. quorum and got %v", byzQuorumSize, len(qc.HighestCertifiedProof))
 	}
 
 	maximumTimestamp := qc.HighestCertifiedProof[0].SignedHighestCertifiedTimestamp.HighestCertifiedTimestamp
@@ -367,7 +375,7 @@ func (qc *StartEpochProof) Verify(
 		return fmt.Errorf("mismatch between timestamp of HighestCertified (%v) and the max from HighestCertifiedProof (%v)", qc.HighestCertified.Timestamp(), maximumTimestamp)
 	}
 
-	if err := qc.HighestCertified.Verify(ocr3ts.ConfigDigest, oracleIdentities, n, f); err != nil {
+	if err := qc.HighestCertified.Verify(ocr3ts.ConfigDigest, oracleIdentities, byzQuorumSize); err != nil {
 		return fmt.Errorf("failed to verify HighestCertified: %w", err)
 	}
 
@@ -382,14 +390,14 @@ type CertifiedPrepareOrCommit interface {
 	Verify(
 		_ types.ConfigDigest,
 		_ []config.OracleIdentity,
-		n int,
-		f int,
+		byzQuorumSize int,
 	) error
+	CheckSize(n int, f int, limits ocr3types.ReportingPluginLimits, maxReportSigLen int) bool
 }
 
-var _ CertifiedPrepareOrCommit = &CertifiedPrepareOrCommitPrepare{}
+var _ CertifiedPrepareOrCommit = &CertifiedPrepare{}
 
-type CertifiedPrepareOrCommitPrepare struct {
+type CertifiedPrepare struct {
 	PrepareEpoch             uint64
 	SeqNr                    uint64
 	OutcomeInputsDigest      OutcomeInputsDigest
@@ -397,31 +405,30 @@ type CertifiedPrepareOrCommitPrepare struct {
 	PrepareQuorumCertificate []AttributedPrepareSignature
 }
 
-func (hc *CertifiedPrepareOrCommitPrepare) isCertifiedPrepareOrCommit() {}
+func (hc *CertifiedPrepare) isCertifiedPrepareOrCommit() {}
 
-func (hc *CertifiedPrepareOrCommitPrepare) Epoch() uint64 {
+func (hc *CertifiedPrepare) Epoch() uint64 {
 	return uint64(hc.PrepareEpoch)
 }
 
-func (hc *CertifiedPrepareOrCommitPrepare) Timestamp() HighestCertifiedTimestamp {
+func (hc *CertifiedPrepare) Timestamp() HighestCertifiedTimestamp {
 	return HighestCertifiedTimestamp{
 		hc.SeqNr,
 		false,
 	}
 }
 
-func (hc *CertifiedPrepareOrCommitPrepare) IsGenesis() bool {
+func (hc *CertifiedPrepare) IsGenesis() bool {
 	return false
 }
 
-func (hc *CertifiedPrepareOrCommitPrepare) Verify(
+func (hc *CertifiedPrepare) Verify(
 	configDigest types.ConfigDigest,
 	oracleIdentities []config.OracleIdentity,
-	n int,
-	f int,
+	byzQuorumSize int,
 ) error {
-	if ByzQuorumSize(n, f) != len(hc.PrepareQuorumCertificate) {
-		return fmt.Errorf("wrong number of signatures, expected %v for byz. quorum and got %v", ByzQuorumSize(n, f), len(hc.PrepareQuorumCertificate))
+	if byzQuorumSize != len(hc.PrepareQuorumCertificate) {
+		return fmt.Errorf("wrong number of signatures, expected %v for byz. quorum and got %v", byzQuorumSize, len(hc.PrepareQuorumCertificate))
 	}
 
 	ocr3ts := Timestamp{
@@ -445,46 +452,59 @@ func (hc *CertifiedPrepareOrCommitPrepare) Verify(
 	return nil
 }
 
-var _ CertifiedPrepareOrCommit = &CertifiedPrepareOrCommitCommit{}
+func (hc *CertifiedPrepare) CheckSize(n int, f int, limits ocr3types.ReportingPluginLimits, maxReportSigLen int) bool {
+	if len(hc.Outcome) > limits.MaxOutcomeLength {
+		return false
+	}
+	if len(hc.PrepareQuorumCertificate) != byzquorum.Size(n, f) {
+		return false
+	}
+	for _, aps := range hc.PrepareQuorumCertificate {
+		if len(aps.Signature) != ed25519.SignatureSize {
+			return false
+		}
+	}
+	return true
+}
 
-type CertifiedPrepareOrCommitCommit struct {
+var _ CertifiedPrepareOrCommit = &CertifiedCommit{}
+
+type CertifiedCommit struct {
 	CommitEpoch             uint64
 	SeqNr                   uint64
 	Outcome                 ocr3types.Outcome
 	CommitQuorumCertificate []AttributedCommitSignature
 }
 
-func (hc *CertifiedPrepareOrCommitCommit) isCertifiedPrepareOrCommit() {}
+func (hc *CertifiedCommit) isCertifiedPrepareOrCommit() {}
 
-func (hc *CertifiedPrepareOrCommitCommit) Epoch() uint64 {
+func (hc *CertifiedCommit) Epoch() uint64 {
 	return uint64(hc.CommitEpoch)
 }
 
-func (hc *CertifiedPrepareOrCommitCommit) Timestamp() HighestCertifiedTimestamp {
+func (hc *CertifiedCommit) Timestamp() HighestCertifiedTimestamp {
 	return HighestCertifiedTimestamp{
 		hc.SeqNr,
 		true,
 	}
 }
 
-func (hc *CertifiedPrepareOrCommitCommit) IsGenesis() bool {
+func (hc *CertifiedCommit) IsGenesis() bool {
 	return hc.CommitEpoch == 0 && hc.SeqNr == 0 && len(hc.Outcome) == 0 && len(hc.CommitQuorumCertificate) == 0
 }
 
-func (hc *CertifiedPrepareOrCommitCommit) Verify(
+func (hc *CertifiedCommit) Verify(
 	configDigest types.ConfigDigest,
 	oracleIdentities []config.OracleIdentity,
-	n int,
-	f int,
+	byzQuorumSize int,
 ) error {
 
 	if hc.IsGenesis() {
 		return nil
 	}
 
-	if ByzQuorumSize(n, f) != len(hc.CommitQuorumCertificate) {
-
-		return fmt.Errorf("wrong number of signatures, expected %v for byz. quorum and got %v. hc %+v", ByzQuorumSize(n, f), len(hc.CommitQuorumCertificate), hc)
+	if byzQuorumSize != len(hc.CommitQuorumCertificate) {
+		return fmt.Errorf("wrong number of signatures, expected %d for byz. quorum but got %d", byzQuorumSize, len(hc.CommitQuorumCertificate))
 	}
 
 	ocr3ts := Timestamp{
@@ -506,4 +526,24 @@ func (hc *CertifiedPrepareOrCommitCommit) Verify(
 		}
 	}
 	return nil
+}
+
+func (hc *CertifiedCommit) CheckSize(n int, f int, limits ocr3types.ReportingPluginLimits, maxReportSigLen int) bool {
+
+	if hc.IsGenesis() {
+		return true
+	}
+
+	if len(hc.Outcome) > limits.MaxOutcomeLength {
+		return false
+	}
+	if len(hc.CommitQuorumCertificate) != byzquorum.Size(n, f) {
+		return false
+	}
+	for _, acs := range hc.CommitQuorumCertificate {
+		if len(acs.Signature) != ed25519.SignatureSize {
+			return false
+		}
+	}
+	return true
 }
