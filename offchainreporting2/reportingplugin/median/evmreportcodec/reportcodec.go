@@ -7,7 +7,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/smartcontractkit/libocr/offchainreporting2/reportingplugin/median"
-	"github.com/smartcontractkit/libocr/offchainreporting2/types"
+	"github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 )
 
 var reportTypes = getReportTypes()
@@ -25,6 +25,7 @@ func getReportTypes() abi.Arguments {
 		{Name: "rawObservers", Type: mustNewType("bytes32")},
 		{Name: "observations", Type: mustNewType("int192[]")},
 		{Name: "juelsPerFeeCoin", Type: mustNewType("int192")},
+		// In the EVM, contracts can query tx.gasPrice during execution. Therefore, there is no need to include it in the report.
 	})
 }
 

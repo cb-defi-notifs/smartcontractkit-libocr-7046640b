@@ -130,8 +130,8 @@ func checkIdentityListsHaveTheSameLength(
 // (1) violations of fundamental constraints like 3*f<n;
 // (2) configurations that would trivially exhaust all of a node's resources;
 // (3) (some) simple mistakes
-
 func checkPublicConfigParameters(cfg PublicConfig) error {
+
 	/////////////////////////////////////////////////////////////////
 	// Be sure to think about changes to other tooling that need to
 	// be made when you change this function!
@@ -244,10 +244,12 @@ func checkPublicConfigParametersForChain(chainID *big.Int, cfg PublicConfig) err
 		144545313136048: {"Arbitrum Testnet Kovan", chainTypePublicTestnet},
 		421611:          {"Arbitrum Testnet Rinkeby", chainTypePublicTestnet},
 		421613:          {"Arbitrum Testnet Goerli", chainTypePublicTestnet},
+		421614:          {"Arbitrum Testnet Sepolia", chainTypePublicTestnet},
 		43114:           {"Avalanche", chainTypeFastUpdates},
 		43113:           {"Avalanche Testnet Fuji", chainTypePublicTestnet},
 		8453:            {"Base", chainTypeFastUpdates},
 		84531:           {"Base Testnet Goerli", chainTypePublicTestnet},
+		84532:           {"Base Testnet Sepolia", chainTypePublicTestnet},
 		56:              {"BSC", chainTypeFastUpdates},
 		97:              {"BSC Testnet", chainTypePublicTestnet},
 		42220:           {"Celo", chainTypeModerateUpdates},
@@ -272,8 +274,11 @@ func checkPublicConfigParametersForChain(chainID *big.Int, cfg PublicConfig) err
 		1666700003:      {"Harmony Testnet Shard 3", chainTypePublicTestnet},
 		8217:            {"Klaytn", chainTypeFastUpdates},
 		1001:            {"Klaytn Testnet Baobab", chainTypePublicTestnet},
-		137:             {"Matic", chainTypeFastUpdates},
-		80001:           {"Matic Testnet", chainTypePublicTestnet},
+		59144:           {"Linea", chainTypeFastUpdates},
+		59140:           {"Linea Testnet Goerli", chainTypePublicTestnet},
+		59141:           {"Linea Testnet Sepolia", chainTypePublicTestnet},
+		5000:            {"Mantle", chainTypeModerateUpdates},
+		5001:            {"Mantle Testnet", chainTypePublicTestnet},
 		1088:            {"Metis", chainTypeFastUpdates},
 		588:             {"Metis Testnet Rinkeby", chainTypePublicTestnet},
 		1284:            {"Moonbeam", chainTypeFastUpdates},
@@ -282,9 +287,24 @@ func checkPublicConfigParametersForChain(chainID *big.Int, cfg PublicConfig) err
 		10:              {"Optimism", chainTypeFastUpdates},
 		69:              {"Optimism Testnet Kovan", chainTypePublicTestnet},
 		420:             {"Optimism Testnet Goerli", chainTypePublicTestnet},
+		11155420:        {"Optimism Testnet Sepolia", chainTypePublicTestnet},
+		137:             {"Polygon", chainTypeFastUpdates},
+		80002:           {"Polygon Testnet Amoy", chainTypePublicTestnet},
+		80001:           {"Polygon Testnet Mumbai", chainTypePublicTestnet},
+		1101:            {"Polygon zkEVM", chainTypeSlowUpdates},
+		1442:            {"Polygon zkEVM Testnet", chainTypePublicTestnet},
+		2442:            {"Polygon zkEVM Testnet Cardona", chainTypePublicTestnet},
 		30:              {"RSK", chainTypeModerateUpdates},
 		31:              {"RSK Testnet", chainTypePublicTestnet},
+		534352:          {"Scroll Mainnet", chainTypeFastUpdates},
+		534351:          {"Scroll Testnet Sepolia", chainTypePublicTestnet},
+		196:             {"X Layer Mainnet", chainTypeFastUpdates},
+		195:             {"X Layer Testnet Sepolia", chainTypePublicTestnet},
 		100:             {"xDai", chainTypeModerateUpdates},
+		10200:           {"xDai Testnet Chiado", chainTypePublicTestnet},
+		324:             {"zkSync Mainnet", chainTypeFastUpdates},
+		280:             {"zkSync Testnet Goerli", chainTypePublicTestnet},
+		300:             {"zkSync Testnet Sepolia", chainTypePublicTestnet},
 	}[chainID.Uint64()]
 	if !ok {
 		// "fail-closed" design. If we don't know the chain, we assume that

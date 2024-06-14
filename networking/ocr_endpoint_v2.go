@@ -8,7 +8,7 @@ import (
 	"go.uber.org/multierr"
 
 	"github.com/smartcontractkit/libocr/commontypes"
-	ocr2types "github.com/smartcontractkit/libocr/offchainreporting2/types"
+	ocr2types "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 	"github.com/smartcontractkit/libocr/ragep2p"
 	ragetypes "github.com/smartcontractkit/libocr/ragep2p/types"
 	"github.com/smartcontractkit/libocr/subprocesses"
@@ -18,6 +18,15 @@ import (
 
 var (
 	_ commontypes.BinaryNetworkEndpoint = &ocrEndpointV2{}
+)
+
+type ocrEndpointState int
+
+const (
+	_ ocrEndpointState = iota
+	ocrEndpointUnstarted
+	ocrEndpointStarted
+	ocrEndpointClosed
 )
 
 type EndpointConfigV2 struct {
@@ -74,6 +83,10 @@ func reverseMappingV2(m map[commontypes.OracleID]ragetypes.PeerID) map[ragetypes
 	}
 	return n
 }
+
+// sendToSelfBufferSize is how many messages we will keep in memory that
+// are sent to ourself before we start dropping
+const sendToSelfBufferSize = 20
 
 func newOCREndpointV2(
 	logger loghelper.LoggerWithContext,

@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"github.com/smartcontractkit/libocr/commontypes"
-	ocr2types "github.com/smartcontractkit/libocr/offchainreporting2/types"
+	ocr2types "github.com/smartcontractkit/libocr/offchainreporting2plus/types"
 	ragetypes "github.com/smartcontractkit/libocr/ragep2p/types"
 
 	"github.com/smartcontractkit/libocr/internal/loghelper"
@@ -14,6 +14,15 @@ import (
 
 var (
 	_ commontypes.Bootstrapper = &bootstrapperV2{}
+)
+
+type bootstrapperState int
+
+const (
+	_ bootstrapperState = iota
+	bootstrapperUnstarted
+	bootstrapperStarted
+	bootstrapperClosed
 )
 
 type bootstrapperV2 struct {

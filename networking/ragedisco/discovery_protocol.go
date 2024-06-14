@@ -10,14 +10,19 @@ import (
 
 	"go.uber.org/multierr"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/smartcontractkit/libocr/commontypes"
-	nettypes "github.com/smartcontractkit/libocr/networking/types"
-	ragetypes "github.com/smartcontractkit/libocr/ragep2p/types"
-
 	"github.com/smartcontractkit/libocr/internal/loghelper"
-	"github.com/smartcontractkit/libocr/offchainreporting2/types"
+	nettypes "github.com/smartcontractkit/libocr/networking/types"
+	"github.com/smartcontractkit/libocr/offchainreporting2plus/types"
+	ragetypes "github.com/smartcontractkit/libocr/ragep2p/types"
 	"github.com/smartcontractkit/libocr/subprocesses"
 )
+
+// Maximum number of distinct oracles that we can have across groups.
+// The exact number is chosen arbitrarily. Better to have an arbitrary limit
+// than no limit.
+const MaxOracles = 165
 
 type incomingMessage struct {
 	payload WrappableMessage
@@ -71,6 +76,7 @@ type discoveryProtocol struct {
 	ctx       context.Context
 	ctxCancel context.CancelFunc
 	logger    loghelper.LoggerWithContext
+	metrics   *discoveryProtocolMetrics
 }
 
 const (
@@ -90,6 +96,7 @@ func newDiscoveryProtocol(
 	ownAddrs []ragetypes.Address,
 	db nettypes.DiscovererDatabase,
 	logger loghelper.LoggerWithContext,
+	metricsRegisterer prometheus.Registerer,
 ) (*discoveryProtocol, error) {
 	ownID, err := ragetypes.PeerIDFromPrivateKey(privKey)
 	if err != nil {
@@ -121,6 +128,7 @@ func newDiscoveryProtocol(
 		ctx,
 		ctxCancel,
 		logger.MakeChild(commontypes.LogFields{"id": "discoveryProtocol"}),
+		newDiscoveryProtocolMetrics(metricsRegisterer, logger, ownID),
 	}, nil
 }
 
@@ -231,22 +239,45 @@ func (p *discoveryProtocol) lockedAllowedPeers(ann Announcement) (ps []ragetypes
 	return
 }
 
+func (p *discoveryProtocol) lockedSetMetrics() {
+	// We assume that the following mappings do not contain zero values
+	// thus it is correct to take their length.
+	p.metrics.registeredPeers.Set(float64(len(p.locked.numGroupsByOracle)))
+	p.metrics.bootstrappers.Set(float64(len(p.locked.numGroupsByBootstrapper)))
+	p.metrics.discoveredPeers.Set(float64(len(p.locked.bestAnnouncement)))
+}
+
 func (p *discoveryProtocol) addGroup(digest types.ConfigDigest, onodes []ragetypes.PeerID, bnodes []ragetypes.PeerInfo) error {
-	var newPeerIDs []ragetypes.PeerID
+	var newOraclePeerIDs []ragetypes.PeerID
 	p.lock.Lock()
 	defer p.lock.Unlock()
+
+	// Until we determine that we will not error out, mutating p.locked is
+	// forbidden.
+
+	defer p.lockedSetMetrics()
 
 	if _, exists := p.locked.groups[digest]; exists {
 		return fmt.Errorf("asked to add group with digest we already have (digest: %s)", digest.Hex())
 	}
+	for _, oid := range onodes {
+		if p.locked.numGroupsByOracle[oid] == 0 {
+			newOraclePeerIDs = append(newOraclePeerIDs, oid)
+		}
+	}
+	if len(p.locked.numGroupsByOracle)+len(newOraclePeerIDs) > MaxOracles {
+		return fmt.Errorf("ragedisco cannot add group: known oracles (%d) + new oracles (%d) exceed total oracle limit (%d)", len(p.locked.numGroupsByOracle), len(newOraclePeerIDs), MaxOracles)
+	}
+
+	// We have determined that we will not error out. Mutating p.locked is only
+	// permitted after this point.
+
 	newGroup := group{oracleNodes: onodes, bootstrapperNodes: bnodes}
 	p.locked.groups[digest] = &newGroup
 	for _, oid := range onodes {
-		if p.locked.numGroupsByOracle[oid] == 0 {
-			newPeerIDs = append(newPeerIDs, oid)
-		}
 		p.locked.numGroupsByOracle[oid]++
 	}
+
 	for _, bs := range bnodes {
 		p.locked.numGroupsByBootstrapper[bs.ID]++
 		for _, addr := range bs.Addrs {
@@ -266,7 +297,7 @@ func (p *discoveryProtocol) addGroup(digest types.ConfigDigest, onodes []ragetyp
 	}
 
 	// we hold lock here
-	if err := p.lockedLoadFromDB(newPeerIDs); err != nil {
+	if err := p.lockedLoadFromDB(newOraclePeerIDs); err != nil {
 		// db-level errors are not prohibitive
 		p.logger.Warn("DiscoveryProtocol: Failed to load announcements from db", commontypes.LogFields{"configDigest": digest, "error": err})
 	}
@@ -374,6 +405,8 @@ func (p *discoveryProtocol) removeGroup(digest types.ConfigDigest) error {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
+	defer p.lockedSetMetrics()
+
 	goneGroup, exists := p.locked.groups[digest]
 	if !exists {
 		return fmt.Errorf("can't remove group that is not registered (digest: %s)", digest.Hex())
@@ -468,6 +501,14 @@ func (p *discoveryProtocol) recvLoop() {
 			case *reconcile:
 				reconcile := *v
 				// logger.Trace("Received reconcile", commontypes.LogFields{"reconcile": reconcile})
+
+				if err := reconcile.checkWellFormed(); err != nil {
+					logger.Warn("Received reconcile that is not well-formed, ignoring", commontypes.LogFields{
+						"reconcile": reconcile,
+						"error":     err,
+					})
+					break // select
+				}
 				for _, ann := range reconcile.Anns {
 					if err := p.processAnnouncement(ann); err != nil {
 
@@ -494,6 +535,8 @@ func (p *discoveryProtocol) processAnnouncement(ann Announcement) error {
 
 // lockedProcessAnnouncement requires lock to be held.
 func (p *discoveryProtocol) lockedProcessAnnouncement(ann Announcement) error {
+	defer p.lockedSetMetrics()
+
 	logger := p.logger.MakeChild(commontypes.LogFields{
 		"in":           "processAnnouncement",
 		"announcement": ann,
@@ -631,6 +674,7 @@ func (p *discoveryProtocol) lockedBumpOwnAnnouncement() (*Announcement, bool, er
 
 func (p *discoveryProtocol) Close() error {
 	logger := p.logger.MakeChild(commontypes.LogFields{"in": "Close"})
+
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
 	if p.state != discoveryProtocolStarted {
@@ -639,6 +683,7 @@ func (p *discoveryProtocol) Close() error {
 	p.state = discoveryProtocolClosed
 
 	logger.Debug("Exiting", nil)
+	p.metrics.Close()
 	defer logger.Debug("Exited", nil)
 	p.ctxCancel()
 	p.processes.Wait()
